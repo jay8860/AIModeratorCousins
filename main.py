@@ -191,9 +191,6 @@ async def settlethis_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(e)
         await update.message.reply_text("Failed to generate a poll.")
 
-async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    user_name = update.message.from_user.first_name
 async def get_live_price_inr(ticker: str) -> float:
     """Helper to fetch price and convert to INR if it is in another currency like USD."""
     try:
@@ -233,6 +230,7 @@ async def get_live_price_inr(ticker: str) -> float:
         return 0.0
 
 async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     user_id = update.message.from_user.id
     user_name = update.message.from_user.first_name
     text = update.message.text
@@ -267,14 +265,14 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         total_cost = current_price * quantity
-        balance = database.get_balance(user_id)
+        balance = database.get_balance(chat_id, user_id)
         
         if balance < total_cost:
             await update.message.reply_text(f"❌ *Failed:* You need ₹{total_cost:,.2f} for {quantity}x {ticker}, but your balance is only ₹{balance:,.2f}.", parse_mode='Markdown')
             return
             
-        database.update_balance(user_id, balance - total_cost)
-        database.buy_stock(user_id, user_name, ticker, quantity, current_price)
+        database.update_balance(chat_id, user_id, balance - total_cost)
+        database.buy_stock(chat_id, user_id, user_name, ticker, quantity, current_price)
         
         await update.message.reply_text(f"✅ *Paper Trade Executed!*\n\n{user_name} bought **{quantity}x {ticker}** at **₹{current_price:,.2f}**.\nTotal value: **₹{total_cost:,.2f}**\nRemaining Cash: **₹{(balance - total_cost):,.2f}**", parse_mode='Markdown')
     except Exception as e:
@@ -282,11 +280,12 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Failed to process paper trade. Try clarifying the stock name.")
 
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     user_id = update.message.from_user.id
     user_name = update.message.from_user.first_name
     
-    balance = database.get_balance(user_id)
-    holdings = database.get_portfolio(user_id)
+    balance = database.get_balance(chat_id, user_id)
+    holdings = database.get_portfolio(chat_id, user_id)
     
     if not holdings:
         await update.message.reply_text(f"💼 *{user_name}'s Portfolio*\n\nCash: **₹{balance:,.2f}**\n\nYou own no assets right now. Use `/buy` to invest!", parse_mode='Markdown')
@@ -320,12 +319,13 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    investors = database.get_all_investors()
+    chat_id = update.effective_chat.id
+    investors = database.get_all_investors(chat_id)
     if not investors:
         await update.message.reply_text("No one has started trading yet! Use `/buy` to get started.", parse_mode="Markdown")
         return
         
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+    await context.bot.send_chat_action(chat_id=chat_id, action='typing')
     
     leaderboard = []
     INITIAL_CASH = 10000000.0
@@ -334,8 +334,8 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         uid = inv["user_id"]
         name = inv["user_name"]
         
-        balance = database.get_balance(uid)
-        holdings = database.get_portfolio(uid)
+        balance = database.get_balance(chat_id, uid)
+        holdings = database.get_portfolio(chat_id, uid)
         
         net_worth = balance
         for h in holdings:
