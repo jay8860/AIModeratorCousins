@@ -70,7 +70,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Send a link, and I will automatically reply with a 5-6 bullet summary.\n"
         "• `/analyse` - I'll summarize the recent debate and pick a factual winner.\n"
         "• `/devils_advocate` - I'll read the room's consensus and argue the exact opposite.\n"
-        "• `/buy [stock] [amount]` - Paper trade any Stock, Crypto, or Gold with a ₹1 Crore starting balance! (e.g. /buy bitcoin 10, /buy reliance 50)\n"
+        "• `/buy [stock] [amount]` - Paper trade Stock, Crypto, or Gold (e.g. /buy bitcoin 10, /buy reliance 50)\n"
+        "• `/sell [stock] [amount]` - Sell your paper-trading assets (e.g. /sell reliance 10)\n"
         "• `/portfolio` - Check your fictional stock portfolio and ROI.\n"
         "• `/leaderboard` - Check the rank of all paper-traders by Net Worth and Rate of Return.\n"
         "• `/settlethis` - I'll generate a Telegram poll based on the current argument.\n"
@@ -240,8 +241,8 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Message: '{text}'\n"
         "CRITICAL INSTRUCTIONS:\n"
         "1. Identify the asset and return its EXACT Yahoo Finance ticker.\n"
+        "   - INDIAN STOCKS ABSOLUTELY MUST END IN '.NS' (e.g. Infosys -> 'INFY.NS', Zomato -> 'ZOMATO.NS', Tata Motors -> 'TATAMOTORS.NS'). THIS IS CRITICAL OR IT WILL CRASH.\n"
         "   - If the company is famous for being PRIVATE or UNLISTED (e.g., Anthropic, OpenAI, Stripe, SpaceX, Urban Company, Zepto), DO NOT guess a ticker. Return the exact word 'UNLISTED'.\n"
-        "   - For Indian stocks: Append '.NS' for NSE or '.BO' for BSE (e.g. Reliance -> 'RELIANCE.NS', Tata Motors -> 'TATAMOTORS.NS').\n"
         "   - For US Stocks: Keep normal (e.g. 'AAPL', 'TSLA').\n"
         "   - For Crypto or Commodities (Bitcoin, Gold, Silver): Must format as pair against INR if possible (e.g. 'BTC-INR', or 'GC=F' for Gold).\n"
         "2. Identify the quantity. If no quantity is specified, assume 1.\n"
@@ -283,6 +284,55 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(e)
         await update.message.reply_text("Failed to process paper trade. Try clarifying the stock name.")
+
+async def sell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_id = update.message.from_user.id
+    user_name = update.message.from_user.first_name
+    text = update.message.text
+    
+    prompt = (
+        "A user in an Indian telegram group wants to SELL an asset in their paper trading portfolio. Extract the correct Yahoo Finance ticker symbol and the quantity.\n"
+        f"Message: '{text}'\n"
+        "CRITICAL INSTRUCTIONS:\n"
+        "1. Identify the asset and return its EXACT Yahoo Finance ticker.\n"
+        "   - INDIAN STOCKS ABSOLUTELY MUST END IN '.NS' (e.g. Infosys -> 'INFY.NS', Zomato -> 'ZOMATO.NS', Tata Motors -> 'TATAMOTORS.NS').\n"
+        "   - For US Stocks: Keep normal (e.g. 'AAPL', 'TSLA').\n"
+        "   - For Crypto or Commodities: 'BTC-INR', 'GC=F', etc.\n"
+        "2. Identify the quantity to sell. If no quantity is specified, assume 1.\n"
+        "3. Return ONLY raw valid JSON exactly like this: {\"ticker\": \"RELIANCE.NS\", \"quantity\": 10}\n"
+        "4. DO NOT wrap with markdown json tags."
+    )
+    try:
+        response = await asyncio.to_thread(client.models.generate_content, model=MODEL_NAME, contents=prompt)
+        text_resp = response.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(text_resp)
+        ticker = data.get("ticker", "").upper()
+        quantity = float(data.get("quantity", 1))
+        
+        if not ticker:
+            await update.message.reply_text("Could not identify what you want to sell.")
+            return
+            
+        current_price = await asyncio.to_thread(asyncio.run, get_live_price_inr(ticker))
+        if not current_price or current_price == 0.0:
+            await update.message.reply_text(f"Could not fetch live market price to sell {ticker} at.")
+            return
+
+        success = database.sell_stock(chat_id, user_id, ticker, quantity)
+        if not success:
+            await update.message.reply_text(f"❌ *Failed to Sell:* You don't own {quantity} shares of {ticker}.", parse_mode='Markdown')
+            return
+            
+        sell_value = current_price * quantity
+        balance = database.get_balance(chat_id, user_id)
+        new_balance = balance + sell_value
+        database.update_balance(chat_id, user_id, new_balance)
+        
+        await update.message.reply_text(f"💸 *Sold Successfully!*\n\n{user_name} sold **{quantity}x {ticker}** at **₹{current_price:,.2f}**.\nCash added: **₹{sell_value:,.2f}**\nNew Cash Balance: **₹{new_balance:,.2f}**", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(e)
+        await update.message.reply_text("Failed to process sell order.")
 
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -515,6 +565,7 @@ def main():
     application.add_handler(CommandHandler("catchup", catchup_command))
     application.add_handler(CommandHandler("settlethis", settlethis_command))
     application.add_handler(CommandHandler("buy", buy_command))
+    application.add_handler(CommandHandler("sell", sell_command))
     application.add_handler(CommandHandler("portfolio", portfolio_command))
     application.add_handler(CommandHandler("leaderboard", leaderboard_command))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))

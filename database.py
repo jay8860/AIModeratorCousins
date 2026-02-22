@@ -74,6 +74,35 @@ def buy_stock(chat_id: int, user_id: int, user_name: str, ticker: str, shares: f
     conn.commit()
     conn.close()
 
+def sell_stock(chat_id: int, user_id: int, ticker: str, shares_to_sell: float) -> bool:
+    """Returns True if successful, False if not enough shares."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    c.execute("SELECT shares, avg_price FROM portfolios_v2 WHERE chat_id = ? AND user_id = ? AND ticker = ?", (chat_id, user_id, ticker))
+    row = c.fetchone()
+    
+    if not row:
+        conn.close()
+        return False
+        
+    current_shares, avg_price = row
+    if current_shares < shares_to_sell:
+        conn.close()
+        return False
+        
+    new_shares = current_shares - shares_to_sell
+    
+    if new_shares <= 0:
+        c.execute("DELETE FROM portfolios_v2 WHERE chat_id = ? AND user_id = ? AND ticker = ?", (chat_id, user_id, ticker))
+    else:
+        c.execute("UPDATE portfolios_v2 SET shares = ? WHERE chat_id = ? AND user_id = ? AND ticker = ?", 
+                  (new_shares, chat_id, user_id, ticker))
+                  
+    conn.commit()
+    conn.close()
+    return True
+
 def get_all_investors(chat_id: int):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
