@@ -5,7 +5,8 @@ from typing import Dict, List
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 # Load environment variables
 load_dotenv()
@@ -13,12 +14,13 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Initialize the new Google GenAI client
+client = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Use Gemini 1.5 Flash - extremely fast, great for streaming background texts
-# Using the -latest suffix as the older SDK can sometimes fail to resolve the base alias
-MODEL_NAME = "gemini-1.5-flash-latest"
+# Use Gemini 2.5 Flash Lite per user request
+MODEL_NAME = "gemini-2.5-flash-lite"
 
 # Setup logging
 logging.basicConfig(
@@ -28,7 +30,7 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# Dictionary to hold the last N messages for context: { chat_id: [ list of message strings ] }
+# Dictionary to hold the last N messages for context
 chat_histories: Dict[int, List[str]] = {}
 MAX_HISTORY_LENGTH = 15
 
@@ -44,12 +46,10 @@ async def analyze_message_with_gemini(chat_history_str: str, current_message: st
     """
     Sends the recent chat history and current message to Gemini for analysis.
     """
-    if not GEMINI_API_KEY:
+    if not client:
         return ""
         
     try:
-        model = genai.GenerativeModel(MODEL_NAME)
-        
         if is_direct_query:
             prompt = (
                 "You are an intelligent, objective, and highly knowledgeable AI Assistant in a group chat of friends discussing business, finance, news, or general topics. "
@@ -71,7 +71,12 @@ async def analyze_message_with_gemini(chat_history_str: str, current_message: st
                 f"--- LATEST MESSAGE TO CHECK ---\n{current_message}"
             )
 
-        response = await asyncio.to_thread(model.generate_content, prompt)
+        # Using the new google-genai syntax
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=MODEL_NAME, 
+            contents=prompt
+        )
         
         if response and response.text:
             return response.text.strip()
@@ -102,7 +107,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
         chat_histories[chat_id].pop(0)
         
-    # Build history context string (excluding the very latest message)
+    # Build history context string
     history_context = "\n".join(chat_histories[chat_id][:-1]) if len(chat_histories[chat_id]) > 1 else "(No prior context)"
 
     # Check if the bot is explicitly mentioned or replied to
@@ -115,12 +120,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_direct_query = is_reply_to_bot or is_mentioned or chat_type == 'private'
 
     if is_direct_query:
-        # Prepare text by removing bot mention
         query_text = text
         if bot_username:
             query_text = query_text.replace(f"@{bot_username}", "").strip()
             
-        # If it was just a tag " @bot ", try to use the replied message text as the query context
         if not query_text and update.message.reply_to_message and update.message.reply_to_message.text:
              query_text = f"[Replying to: {update.message.reply_to_message.text}]"
 
@@ -134,11 +137,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if result:
             await update.message.reply_text(result, parse_mode='Markdown')
         else:
-            await update.message.reply_text("I'm sorry, I couldn't process that right now. Ensure GEMINI_API_KEY is active.")
+            await update.message.reply_text("I'm sorry, I couldn't process that right now. Ensure GEMINI_API_KEY is active and valid.")
             
     else:
         # Spectator Mode Fact-Checking
-        # Only check if the message is somewhat conversational
         if len(text.split()) > 4: 
             result = await analyze_message_with_gemini(history_context, f"{user_name}: {text}", is_direct_query=False)
             
@@ -159,8 +161,11 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
 
-    logger.info("Fact Checker & Analyst Bot is running...")
-    application.run_polling()
+    logger.info(f"Fact Checker & Analyst Bot is running... (Model: {MODEL_NAME})")
+    
+    # drop_pending_updates=True clears out old messages and fixes the "Conflict" error 
+    # if multiple instances or ghost processes try to poll at once
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
