@@ -240,6 +240,7 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Message: '{text}'\n"
         "CRITICAL INSTRUCTIONS:\n"
         "1. Identify the asset and return its EXACT Yahoo Finance ticker.\n"
+        "   - If the company is famous for being PRIVATE or UNLISTED (e.g., Anthropic, OpenAI, Stripe, SpaceX, Urban Company, Zepto), DO NOT guess a ticker. Return the exact word 'UNLISTED'.\n"
         "   - For Indian stocks: Append '.NS' for NSE or '.BO' for BSE (e.g. Reliance -> 'RELIANCE.NS', Tata Motors -> 'TATAMOTORS.NS').\n"
         "   - For US Stocks: Keep normal (e.g. 'AAPL', 'TSLA').\n"
         "   - For Crypto or Commodities (Bitcoin, Gold, Silver): Must format as pair against INR if possible (e.g. 'BTC-INR', or 'GC=F' for Gold).\n"
@@ -256,6 +257,10 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not ticker:
             await update.message.reply_text("Could not identify the stock ticker. Try again!")
+            return
+            
+        if ticker == "UNLISTED":
+            await update.message.reply_text("⛔ That company is currently private/unlisted! You can only paper-trade publicly traded assets on the stock market.")
             return
             
         current_price = await asyncio.to_thread(asyncio.run, get_live_price_inr(ticker))
