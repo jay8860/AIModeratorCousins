@@ -194,6 +194,47 @@ async def settlethis_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_name = update.message.from_user.first_name
+async def get_live_price_inr(ticker: str) -> float:
+    """Helper to fetch price and convert to INR if it is in another currency like USD."""
+    try:
+        stock = yf.Ticker(ticker)
+        fast_info = stock.fast_info
+        
+        # Try to get the price
+        price = fast_info.get("lastPrice")
+        
+        # Handle crypto fallback
+        if not price and "-INR" in ticker:
+            ticker = ticker.replace("-INR", "-USD")
+            stock = yf.Ticker(ticker)
+            fast_info = stock.fast_info
+            price = fast_info.get("lastPrice")
+            
+        if not price:
+            return 0.0
+            
+        # Determine currency
+        currency = getattr(fast_info, 'currency', getattr(stock.info, 'currency', 'INR')).upper()
+        
+        # If it's already INR, return exact
+        if currency == 'INR' or ticker.endswith('.NS') or ticker.endswith('.BO'):
+            return float(price)
+            
+        # Otherwise, assume it needs conversion (like USD)
+        try:
+            fx = yf.Ticker("USDINR=X")
+            fx_rate = fx.fast_info.get("lastPrice", 83.5) # Fallback to 83.5 if API fails
+            return float(price * fx_rate)
+        except Exception:
+            return float(price * 83.5)
+            
+    except Exception as e:
+        logger.error(f"Error fetching price for {ticker}: {e}")
+        return 0.0
+
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    user_name = update.message.from_user.first_name
     text = update.message.text
     
     prompt = (
@@ -219,19 +260,9 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Could not identify the stock ticker. Try again!")
             return
             
-        stock = yf.Ticker(ticker)
-        current_price = stock.fast_info.get("lastPrice")
+        current_price = await asyncio.to_thread(asyncio.run, get_live_price_inr(ticker))
         
-        # fallback for crypto sometimes missing on INR pair
-        if not current_price and "-INR" in ticker:
-             fallback = ticker.replace("-INR","-USD")
-             stock = yf.Ticker(fallback)
-             current_price = stock.fast_info.get("lastPrice")
-             # rough conversion if usd
-             if current_price: current_price *= 86.0  
-             ticker = fallback
-             
-        if not current_price:
+        if not current_price or current_price == 0.0:
             await update.message.reply_text(f"Could not fetch real-time price for {ticker}.")
             return
             
@@ -271,14 +302,15 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         shares = h['shares']
         avg = h['avg_price']
         total_invested += (shares * avg)
-        try:
-            curr = yf.Ticker(ticker).fast_info.get("lastPrice", avg)
+        
+        curr = await asyncio.to_thread(asyncio.run, get_live_price_inr(ticker))
+        if curr and curr > 0:
             val = shares * curr
             total_value += val
             pct_change = ((curr - avg) / avg) * 100
             emoji = "🟢" if pct_change >= 0 else "🔴"
             msg += f"• **{ticker}**: {shares} QTY @ ₹{curr:,.2f} (Avg ₹{avg:,.2f}) {emoji} `{pct_change:+.2f}%`\n"
-        except Exception:
+        else:
             msg += f"• **{ticker}**: {shares} QTY (Avg ₹{avg:,.2f})\n"
             total_value += (shares * avg)
             
@@ -307,12 +339,11 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         net_worth = balance
         for h in holdings:
-            try:
-                curr = yf.Ticker(h['ticker']).fast_info.get("lastPrice", h['avg_price'])
+            curr = await asyncio.to_thread(asyncio.run, get_live_price_inr(h['ticker']))
+            if curr and curr > 0:
                 net_worth += (h['shares'] * curr)
-            except Exception:
+            else:
                 net_worth += (h['shares'] * h['avg_price'])
-                
         roi_pct = ((net_worth - INITIAL_CASH) / INITIAL_CASH) * 100
         leaderboard.append({"name": name, "nw": net_worth, "roi": roi_pct})
         
