@@ -17,7 +17,8 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 # Use Gemini 1.5 Flash - extremely fast, great for streaming background texts
-MODEL_NAME = "gemini-1.5-flash"
+# Using the -latest suffix as the older SDK can sometimes fail to resolve the base alias
+MODEL_NAME = "gemini-1.5-flash-latest"
 
 # Setup logging
 logging.basicConfig(
