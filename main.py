@@ -72,6 +72,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/devils_advocate` - I'll read the room's consensus and argue the exact opposite.\n"
         "• `/buy [stock] [amount]` - Paper trade stocks with $100k starting cash! (e.g. /buy apple 10)\n"
         "• `/portfolio` - Check your fictional stock portfolio.\n"
+        "• `/leaderboard` - Check the rank and net worth of all paper-traders in the group.\n"
         "• `/settlethis` - I'll generate a Telegram poll based on the current argument.\n"
         "• `/catchup` - Wake up to 100 missed messages? I will brief you like a news anchor."
     )
@@ -268,6 +269,42 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"\n*Net Worth:* **${total_value:,.2f}**"
     await update.message.reply_text(msg, parse_mode='Markdown')
 
+async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    investors = database.get_all_investors()
+    if not investors:
+        await update.message.reply_text("No one has started trading yet! Use `/buy` to get started.", parse_mode="Markdown")
+        return
+        
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+    
+    leaderboard = []
+    for inv in investors:
+        uid = inv["user_id"]
+        name = inv["user_name"]
+        
+        balance = database.get_balance(uid)
+        holdings = database.get_portfolio(uid)
+        
+        net_worth = balance
+        for h in holdings:
+            try:
+                curr = yf.Ticker(h['ticker']).fast_info.get("lastPrice", h['avg_price'])
+                net_worth += (h['shares'] * curr)
+            except Exception:
+                net_worth += (h['shares'] * h['avg_price'])
+                
+        leaderboard.append({"name": name, "nw": net_worth})
+        
+    # Sort descending
+    leaderboard.sort(key=lambda x: x["nw"], reverse=True)
+    
+    msg = "🏆 *Group Trading Leaderboard*\n\n"
+    for i, inv in enumerate(leaderboard):
+        medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else ("🎗️" if i == 3 else "📈")
+        msg += f"{medal} **{inv['name']}** - ${inv['nw']:,.2f}\n"
+        
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
 # --- ORIGINAL COMMANDS ---
 async def analyse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -411,6 +448,7 @@ def main():
     application.add_handler(CommandHandler("settlethis", settlethis_command))
     application.add_handler(CommandHandler("buy", buy_command))
     application.add_handler(CommandHandler("portfolio", portfolio_command))
+    application.add_handler(CommandHandler("leaderboard", leaderboard_command))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
 
     logger.info(f"Fact Checker & Analyst Bot is running... (Model: {MODEL_NAME})")

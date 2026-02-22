@@ -70,3 +70,11 @@ def buy_stock(user_id: int, user_name: str, ticker: str, shares: float, price: f
         
     conn.commit()
     conn.close()
+
+def get_all_investors():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT user_id, user_name FROM portfolios")
+    rows = c.fetchall()
+    conn.close()
+    return [{"user_id": r[0], "user_name": r[1]} for r in rows]
