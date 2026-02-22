@@ -54,8 +54,12 @@ async def analyze_message_with_gemini(chat_history_str: str, current_message: st
             prompt = (
                 "You are an intelligent, objective, and highly knowledgeable AI Assistant in a group chat of friends discussing business, finance, news, or general topics. "
                 "Someone has directly asked you for your input, reasoning, or opinion. "
-                "Below is the recent chat history for context, followed by the explicit message/query directed at you. "
-                "Provide a clear, factual, well-reasoned, and helpful response. If they are asking for analysis of an argument, provide your insights based on the context.\n\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. Be extremely concise and direct.\n"
+                "2. NEVER use diplomatic phrases like 'As an AI, I am neutral' or 'I must remain objective.'\n"
+                "3. Just provide the raw facts, cold analysis, and direct reasoning immediately.\n"
+                "4. Keep the response as short as possible while still being helpful.\n\n"
+                "Below is the recent chat history for context, followed by the explicit message/query directed at you.\n\n"
                 f"--- RECENT CHAT HISTORY ---\n{chat_history_str}\n\n"
                 f"--- DIRECT QUERY FOR YOU ---\n{current_message}"
             )
@@ -63,10 +67,13 @@ async def analyze_message_with_gemini(chat_history_str: str, current_message: st
             prompt = (
                 "You are a strict and objective fact-checker spectating a group chat. "
                 "Your job is to read the latest message in the context of the recent conversation, and determine if the latest statement is fundamentally and objectively factually incorrect. "
-                "Below is the recent chat history for context, followed by the latest message. "
-                "If the latest message contains a blatant factual error, explain why and provide the correct facts. "
-                "If the statement is a subjective opinion, an argument, a debatable viewpoint, or simply mostly accurate, you MUST reply with ONLY the exact string 'NO_CORRECTION_NEEDED'. "
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. If the statement is a subjective opinion, an argument, a debatable viewpoint, or simply mostly accurate, you MUST reply with ONLY the exact string 'NO_CORRECTION_NEEDED'.\n"
+                "2. If there is a blatant factual error, intervene by keeping it extremely concise. Do not use filler words.\n"
+                "3. NEVER use diplomatic phrases or meta-commentary about being an AI.\n"
+                "4. Provide the correct facts immediately in 1-2 bullet points if possible.\n"
                 "Do not intervene for minor technicalities; only jump in when something is demonstrably false and misleading.\n\n"
+                "Below is the recent chat history for context, followed by the latest message.\n\n"
                 f"--- RECENT CHAT HISTORY ---\n{chat_history_str}\n\n"
                 f"--- LATEST MESSAGE TO CHECK ---\n{current_message}"
             )
