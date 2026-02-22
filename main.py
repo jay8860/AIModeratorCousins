@@ -160,7 +160,7 @@ async def analyze_message_with_gemini(chat_history_str: str, current_message: st
                 "Someone has directly asked you for your input, reasoning, or opinion. "
                 "CRITICAL INSTRUCTIONS:\n"
                 "1. NEVER use diplomatic phrases like 'As an AI, I am neutral' or 'I must remain objective.'\n"
-                "2. NO ESSAYS. You must respond in exactly 3 to 4 concise, hard-hitting bullet points. Do not write paragraphs of text.\n"
+                "2. NO ESSAYS. You must respond using concise, hard-hitting bullet points. Use your intelligence to determine how many points are needed to accurately balance the topic, but NEVER exceed 10 points.\n"
                 "3. If asked about an opinion or a debatable topic, present both sides of the argument fairly within those bullets, then give a realistic conclusion.\n"
                 "4. ABSOLUTE RULE: Do NOT use any profanity. Do NOT abuse or disrespect constitutional posts (e.g., the Prime Minister, President, etc.). Express critiques respectfully.\n\n"
                 "Below is the recent chat history for context, followed by the explicit message/query directed at you.\n\n"
