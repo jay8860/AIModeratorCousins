@@ -13,11 +13,31 @@ from dotenv import load_dotenv
 from google import genai
 import database
 
-# Initialize paper trading DB
-database.init_db()
-
 # Load environment variables
 load_dotenv()
+
+DATA_DIR = os.getenv("DATA_DIR", ".")
+HISTORY_FILE = os.path.join(DATA_DIR, "chat_histories.json")
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r") as f:
+                data = json.load(f)
+                return {int(k): v for k, v in data.items()}
+        except Exception:
+            pass
+    return {}
+
+def save_history(history):
+    try:
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(history, f)
+    except Exception:
+        pass
+
+# Initialize paper trading DB
+database.init_db()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -38,7 +58,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # Dictionary to hold the last N messages for context
-chat_histories: Dict[int, List[str]] = {}
+chat_histories: Dict[int, List[str]] = load_history()
 MAX_HISTORY_LENGTH = 150  # Increased for daily catchup
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -331,6 +351,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
         chat_histories[chat_id].pop(0)
+        
+    save_history(chat_histories)
 
     # Summarize URLs
     urls = extract_urls(text)

@@ -1,7 +1,8 @@
 import sqlite3
 import os
 
-DB_FILE = "portfolio.db"
+DATA_DIR = os.getenv("DATA_DIR", ".")
+DB_FILE = os.path.join(DATA_DIR, "portfolio.db")
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
