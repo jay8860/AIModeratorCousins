@@ -70,9 +70,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Send a link, and I will automatically reply with a 5-6 bullet summary.\n"
         "• `/analyse` - I'll summarize the recent debate and pick a factual winner.\n"
         "• `/devils_advocate` - I'll read the room's consensus and argue the exact opposite.\n"
-        "• `/buy [stock] [amount]` - Paper trade stocks with $100k starting cash! (e.g. /buy apple 10)\n"
-        "• `/portfolio` - Check your fictional stock portfolio.\n"
-        "• `/leaderboard` - Check the rank and net worth of all paper-traders in the group.\n"
+        "• `/buy [stock] [amount]` - Paper trade any Stock, Crypto, or Gold with a ₹1 Crore starting balance! (e.g. /buy bitcoin 10, /buy reliance 50)\n"
+        "• `/portfolio` - Check your fictional stock portfolio and ROI.\n"
+        "• `/leaderboard` - Check the rank of all paper-traders by Net Worth and Rate of Return.\n"
         "• `/settlethis` - I'll generate a Telegram poll based on the current argument.\n"
         "• `/catchup` - Wake up to 100 missed messages? I will brief you like a news anchor."
     )
@@ -197,12 +197,15 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
     prompt = (
-        "A user in a telegram group wants to paper-trade a stock. Extract the stock ticker and the quantity they wish to buy.\n"
+        "A user in an Indian telegram group wants to paper-trade an asset. Extract the correct Yahoo Finance ticker symbol and the quantity.\n"
         f"Message: '{text}'\n"
         "CRITICAL INSTRUCTIONS:\n"
-        "1. Identify the company and return its official US Stock TICKER symbol (e.g. 'Apple' -> 'AAPL').\n"
+        "1. Identify the asset and return its EXACT Yahoo Finance ticker.\n"
+        "   - For Indian stocks: Append '.NS' for NSE or '.BO' for BSE (e.g. Reliance -> 'RELIANCE.NS', Tata Motors -> 'TATAMOTORS.NS').\n"
+        "   - For US Stocks: Keep normal (e.g. 'AAPL', 'TSLA').\n"
+        "   - For Crypto or Commodities (Bitcoin, Gold, Silver): Must format as pair against INR if possible (e.g. 'BTC-INR', or 'GC=F' for Gold).\n"
         "2. Identify the quantity. If no quantity is specified, assume 1.\n"
-        "3. Return ONLY raw valid JSON exactly like this: {\"ticker\": \"AAPL\", \"quantity\": 10}\n"
+        "3. Return ONLY raw valid JSON exactly like this: {\"ticker\": \"RELIANCE.NS\", \"quantity\": 10}\n"
         "4. DO NOT wrap with markdown json tags."
     )
     try:
@@ -218,6 +221,16 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         stock = yf.Ticker(ticker)
         current_price = stock.fast_info.get("lastPrice")
+        
+        # fallback for crypto sometimes missing on INR pair
+        if not current_price and "-INR" in ticker:
+             fallback = ticker.replace("-INR","-USD")
+             stock = yf.Ticker(fallback)
+             current_price = stock.fast_info.get("lastPrice")
+             # rough conversion if usd
+             if current_price: current_price *= 86.0  
+             ticker = fallback
+             
         if not current_price:
             await update.message.reply_text(f"Could not fetch real-time price for {ticker}.")
             return
@@ -226,16 +239,16 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance = database.get_balance(user_id)
         
         if balance < total_cost:
-            await update.message.reply_text(f"❌ *Failed:* You need ${total_cost:,.2f} for {quantity}x {ticker}, but your balance is only ${balance:,.2f}.", parse_mode='Markdown')
+            await update.message.reply_text(f"❌ *Failed:* You need ₹{total_cost:,.2f} for {quantity}x {ticker}, but your balance is only ₹{balance:,.2f}.", parse_mode='Markdown')
             return
             
         database.update_balance(user_id, balance - total_cost)
         database.buy_stock(user_id, user_name, ticker, quantity, current_price)
         
-        await update.message.reply_text(f"✅ *Paper Trade Executed!*\n\n{user_name} bought **{quantity}x {ticker}** at **${current_price:,.2f}**.\nTotal value: **${total_cost:,.2f}**\nRemaining Cash: **${(balance - total_cost):,.2f}**", parse_mode='Markdown')
+        await update.message.reply_text(f"✅ *Paper Trade Executed!*\n\n{user_name} bought **{quantity}x {ticker}** at **₹{current_price:,.2f}**.\nTotal value: **₹{total_cost:,.2f}**\nRemaining Cash: **₹{(balance - total_cost):,.2f}**", parse_mode='Markdown')
     except Exception as e:
         logger.error(e)
-        await update.message.reply_text("Failed to process paper trade.")
+        await update.message.reply_text("Failed to process paper trade. Try clarifying the stock name.")
 
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -245,28 +258,33 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     holdings = database.get_portfolio(user_id)
     
     if not holdings:
-        await update.message.reply_text(f"💼 *{user_name}'s Portfolio*\n\nCash: **${balance:,.2f}**\n\nYou own no stocks right now. Use `/buy` to invest!", parse_mode='Markdown')
+        await update.message.reply_text(f"💼 *{user_name}'s Portfolio*\n\nCash: **₹{balance:,.2f}**\n\nYou own no assets right now. Use `/buy` to invest!", parse_mode='Markdown')
         return
         
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
-    msg = f"💼 *{user_name}'s Portfolio*\n\nCash: **${balance:,.2f}**\n\n*Holdings:*\n"
+    msg = f"💼 *{user_name}'s Portfolio*\n\nCash: **₹{balance:,.2f}**\n\n*Holdings:*\n"
     total_value = balance
+    total_invested = 0
     
     for h in holdings:
         ticker = h['ticker']
         shares = h['shares']
         avg = h['avg_price']
+        total_invested += (shares * avg)
         try:
             curr = yf.Ticker(ticker).fast_info.get("lastPrice", avg)
             val = shares * curr
             total_value += val
             pct_change = ((curr - avg) / avg) * 100
             emoji = "🟢" if pct_change >= 0 else "🔴"
-            msg += f"• **{ticker}**: {shares} shares @ ${curr:,.2f} (Avg ${avg:,.2f}) {emoji} `{pct_change:+.2f}%`\n"
+            msg += f"• **{ticker}**: {shares} QTY @ ₹{curr:,.2f} (Avg ₹{avg:,.2f}) {emoji} `{pct_change:+.2f}%`\n"
         except Exception:
-            msg += f"• **{ticker}**: {shares} shares (Avg ${avg:,.2f})\n"
+            msg += f"• **{ticker}**: {shares} QTY (Avg ₹{avg:,.2f})\n"
+            total_value += (shares * avg)
             
-    msg += f"\n*Net Worth:* **${total_value:,.2f}**"
+    total_roi = ((total_value - 10000000.0) / 10000000.0) * 100
+    emoji_roi = "🟢" if total_roi >= 0 else "🔴"
+    msg += f"\n*Net Worth:* **₹{total_value:,.2f}**\n*All-Time ROI:* {emoji_roi} `{total_roi:+.2f}%`"
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -278,6 +296,8 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     
     leaderboard = []
+    INITIAL_CASH = 10000000.0
+    
     for inv in investors:
         uid = inv["user_id"]
         name = inv["user_name"]
@@ -293,16 +313,28 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             except Exception:
                 net_worth += (h['shares'] * h['avg_price'])
                 
-        leaderboard.append({"name": name, "nw": net_worth})
+        roi_pct = ((net_worth - INITIAL_CASH) / INITIAL_CASH) * 100
+        leaderboard.append({"name": name, "nw": net_worth, "roi": roi_pct})
         
-    # Sort descending
-    leaderboard.sort(key=lambda x: x["nw"], reverse=True)
+    # Sort for Absolute Net Worth
+    lb_nw = sorted(leaderboard, key=lambda x: x["nw"], reverse=True)
     
-    msg = "🏆 *Group Trading Leaderboard*\n\n"
-    for i, inv in enumerate(leaderboard):
-        medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else ("🎗️" if i == 3 else "📈")
-        msg += f"{medal} **{inv['name']}** - ${inv['nw']:,.2f}\n"
-        
+    # Sort for Best Investors (ROI %)
+    lb_roi = sorted(leaderboard, key=lambda x: x["roi"], reverse=True)
+    
+    msg = "🏆 *GROUP TRADING LEADERBOARD*\n\n"
+    
+    msg += "💰 *By Total Net Worth (Absolute)*\n"
+    for i, inv in enumerate(lb_nw):
+        medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "  "
+        msg += f"{medal} **{inv['name']}** - ₹{inv['nw']:,.2f}\n"
+
+    msg += "\n📈 *By Best Investors (ROI %)*\n"
+    for i, inv in enumerate(lb_roi):
+        medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "  "
+        emoji = "🟢" if inv['roi'] >= 0 else "🔴"
+        msg += f"{medal} **{inv['name']}** - {emoji} `{inv['roi']:+.2f}%`\n"
+
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 # --- ORIGINAL COMMANDS ---

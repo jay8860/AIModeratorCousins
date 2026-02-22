@@ -34,7 +34,7 @@ def get_balance(user_id: int):
     conn.close()
     if row:
         return row[0]
-    return 100000.0  # Starting balance of $100,000
+    return 10000000.0  # Starting balance of ₹1 Crore
 
 def update_balance(user_id: int, new_balance: float):
     conn = sqlite3.connect(DB_FILE)
