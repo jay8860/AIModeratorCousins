@@ -2,14 +2,19 @@ import logging
 import os
 import asyncio
 import re
+import json
 import httpx
+import yfinance as yf
 from bs4 import BeautifulSoup
 from typing import Dict, List
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
+import database
+
+# Initialize paper trading DB
+database.init_db()
 
 # Load environment variables
 load_dotenv()
@@ -22,7 +27,6 @@ client = None
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Use Gemini 2.5 Flash Lite per user request
 MODEL_NAME = "gemini-2.5-flash-lite"
 
 # Setup logging
@@ -35,16 +39,21 @@ logger = logging.getLogger(__name__)
 
 # Dictionary to hold the last N messages for context
 chat_histories: Dict[int, List[str]] = {}
-MAX_HISTORY_LENGTH = 30  # Increased to 30 as requested
+MAX_HISTORY_LENGTH = 150  # Increased for daily catchup
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "Hello! 🤖 *Fact Checker & Analyst Bot* is active.\n\n"
         "I spectate this group to intervene if I detect objectively factually incorrect statements.\n"
         "You can also reply to my messages or tag me to ask for my opinion, reasoning, or analysis of the ongoing conversation!\n\n"
-        "**New Features:**\n"
+        "**New Commands:**\n"
         "• Send a link, and I will automatically reply with a 5-6 bullet summary.\n"
-        "• Type `/analyse` to get a summary of the debate over the last 30 messages, including my take on who has the most realistic and factual arguments."
+        "• `/analyse` - I'll summarize the recent debate and pick a factual winner.\n"
+        "• `/devils_advocate` - I'll read the room's consensus and argue the exact opposite.\n"
+        "• `/buy [stock] [amount]` - Paper trade stocks with $100k starting cash! (e.g. /buy apple 10)\n"
+        "• `/portfolio` - Check your fictional stock portfolio.\n"
+        "• `/settlethis` - I'll generate a Telegram poll based on the current argument.\n"
+        "• `/catchup` - Wake up to 100 missed messages? I will brief you like a news anchor."
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
@@ -59,18 +68,12 @@ async def fetch_article_text(url: str) -> str:
             response = await http_client.get(url)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Remove scripts and styles
             for script in soup(["script", "style"]):
                 script.extract()
-                
             text = soup.get_text(separator=' ')
-            # Clean up whitespace
             lines = (line.strip() for line in text.splitlines())
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             text = '\n'.join(chunk for chunk in chunks if chunk)
-            
-            # Return up to 15,000 characters to prevent massive payloads
             return text[:15000]
     except Exception as e:
         logger.error(f"Error fetching URL {url}: {e}")
@@ -80,7 +83,6 @@ async def summarize_link(url: str) -> str:
     article_text = await fetch_article_text(url)
     if not article_text:
         return ""
-        
     prompt = (
         "You are an intelligent summarization AI. A user just shared a link in a group chat.\n"
         "CRITICAL INSTRUCTIONS:\n"
@@ -89,33 +91,170 @@ async def summarize_link(url: str) -> str:
         "3. NEVER use diplomatic filler like 'As an AI' or 'Here is the summary'. Start straight with the bullets.\n\n"
         f"--- ARTICLE CONTENT ---\n{article_text}"
     )
-    
     try:
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MODEL_NAME, 
-            contents=prompt
-        )
+        response = await asyncio.to_thread(client.models.generate_content, model=MODEL_NAME, contents=prompt)
         if response and response.text:
             return response.text.strip()
-    except Exception as e:
-        logger.error(f"Error summarizing link: {e}")
+    except Exception:
+        pass
     return ""
 
-# --- COMMANDS ---
+# --- ADVANCED COMMANDS ---
+async def devils_advocate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not client or chat_id not in chat_histories or len(chat_histories[chat_id]) < 5:
+        await update.message.reply_text("Need more chat history to play Devil's Advocate!")
+        return
+    history = "\n".join(chat_histories[chat_id][-30:])
+    prompt = (
+        "You are playing 'Devil's Advocate' in a family group chat. "
+        "Read the recent chat history and identify the current consensus or majority agreement.\n"
+        "CRITICAL INSTRUCTIONS:\n"
+        "1. Act like the smart, slightly contrarian cousin. Use 'bhaiya/didi/guys'.\n"
+        "2. Formulate the absolute strongest, most factual argument *against* what the group is currently agreeing on to spark a deeper debate.\n"
+        "3. Respond in exactly 3-5 punchy bullet points. No essays. No 'As an AI'.\n\n"
+        f"--- RECENT HISTORY ---\n{history}"
+    )
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+        response = await asyncio.to_thread(client.models.generate_content, model=MODEL_NAME, contents=prompt)
+        await update.message.reply_text(f"😈 *Devil's Advocate Mode:*\n\n{response.text.strip()}", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(e)
+
+async def catchup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not client or chat_id not in chat_histories or len(chat_histories[chat_id]) < 10:
+        await update.message.reply_text("Not enough messages to generate a daily briefing.")
+        return
+    history = "\n".join(chat_histories[chat_id])
+    prompt = (
+        "You are the family's resident news anchor cousin. Summarize the missed messages for someone rejoining the chat.\n"
+        "CRITICAL INSTRUCTIONS:\n"
+        "1. Start with a fun, friendly greeting like 'Here is what you missed, guys!'.\n"
+        "2. Group the chatter by topics in 3-5 bullet points. Keep it engaging.\n"
+        "3. Highlight if anyone had a massive argument or shared something important.\n"
+        "4. No essays, keep it punchy.\n\n"
+        f"--- FULL CHAT HISTORY ---\n{history}"
+    )
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+        response = await asyncio.to_thread(client.models.generate_content, model=MODEL_NAME, contents=prompt)
+        await update.message.reply_text(f"📰 *Daily Catch-Up:*\n\n{response.text.strip()}", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(e)
+
+async def settlethis_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not client or chat_id not in chat_histories or len(chat_histories[chat_id]) < 6:
+        await update.message.reply_text("Need more context to identify a debate to settle!")
+        return
+    history = "\n".join(chat_histories[chat_id][-40:])
+    prompt = (
+        "Identify the core disagreement in the following group chat.\n"
+        "Return ONLY raw JSON with exactly two fields: 'question' (max 255 chars) and 'options' (a list of EXACTLY 2 to 4 distinct viewpoints/options, max 100 chars each).\n"
+        "DO NOT output markdown ticks or the word json. ONLY RAW VALID JSON.\n"
+        "Example: {\"question\": \"Is Bitcoin a good hedge against inflation right now?\", \"options\": [\"Yes, it is fundamentally sound\", \"No, it is too volatile\"]}\n"
+        f"--- HISTORY ---\n{history}"
+    )
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+        response = await asyncio.to_thread(client.models.generate_content, model=MODEL_NAME, contents=prompt)
+        text = response.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(text)
+        if "question" in data and "options" in data:
+            await context.bot.send_poll(chat_id=chat_id, question=f"⚖️ Lets Settle This: {data['question']}", options=data['options'], is_anonymous=False)
+        else:
+            await update.message.reply_text("Couldn't figure out exactly what the debate was to make a poll.")
+    except Exception as e:
+        logger.error(e)
+        await update.message.reply_text("Failed to generate a poll.")
+
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    user_name = update.message.from_user.first_name
+    text = update.message.text
+    
+    prompt = (
+        "A user in a telegram group wants to paper-trade a stock. Extract the stock ticker and the quantity they wish to buy.\n"
+        f"Message: '{text}'\n"
+        "CRITICAL INSTRUCTIONS:\n"
+        "1. Identify the company and return its official US Stock TICKER symbol (e.g. 'Apple' -> 'AAPL').\n"
+        "2. Identify the quantity. If no quantity is specified, assume 1.\n"
+        "3. Return ONLY raw valid JSON exactly like this: {\"ticker\": \"AAPL\", \"quantity\": 10}\n"
+        "4. DO NOT wrap with markdown json tags."
+    )
+    try:
+        response = await asyncio.to_thread(client.models.generate_content, model=MODEL_NAME, contents=prompt)
+        text_resp = response.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(text_resp)
+        ticker = data.get("ticker", "").upper()
+        quantity = float(data.get("quantity", 1))
+        
+        if not ticker:
+            await update.message.reply_text("Could not identify the stock ticker. Try again!")
+            return
+            
+        stock = yf.Ticker(ticker)
+        current_price = stock.fast_info.get("lastPrice")
+        if not current_price:
+            await update.message.reply_text(f"Could not fetch real-time price for {ticker}.")
+            return
+            
+        total_cost = current_price * quantity
+        balance = database.get_balance(user_id)
+        
+        if balance < total_cost:
+            await update.message.reply_text(f"❌ *Failed:* You need ${total_cost:,.2f} for {quantity}x {ticker}, but your balance is only ${balance:,.2f}.", parse_mode='Markdown')
+            return
+            
+        database.update_balance(user_id, balance - total_cost)
+        database.buy_stock(user_id, user_name, ticker, quantity, current_price)
+        
+        await update.message.reply_text(f"✅ *Paper Trade Executed!*\n\n{user_name} bought **{quantity}x {ticker}** at **${current_price:,.2f}**.\nTotal value: **${total_cost:,.2f}**\nRemaining Cash: **${(balance - total_cost):,.2f}**", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(e)
+        await update.message.reply_text("Failed to process paper trade.")
+
+async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    user_name = update.message.from_user.first_name
+    
+    balance = database.get_balance(user_id)
+    holdings = database.get_portfolio(user_id)
+    
+    if not holdings:
+        await update.message.reply_text(f"💼 *{user_name}'s Portfolio*\n\nCash: **${balance:,.2f}**\n\nYou own no stocks right now. Use `/buy` to invest!", parse_mode='Markdown')
+        return
+        
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+    msg = f"💼 *{user_name}'s Portfolio*\n\nCash: **${balance:,.2f}**\n\n*Holdings:*\n"
+    total_value = balance
+    
+    for h in holdings:
+        ticker = h['ticker']
+        shares = h['shares']
+        avg = h['avg_price']
+        try:
+            curr = yf.Ticker(ticker).fast_info.get("lastPrice", avg)
+            val = shares * curr
+            total_value += val
+            pct_change = ((curr - avg) / avg) * 100
+            emoji = "🟢" if pct_change >= 0 else "🔴"
+            msg += f"• **{ticker}**: {shares} shares @ ${curr:,.2f} (Avg ${avg:,.2f}) {emoji} `{pct_change:+.2f}%`\n"
+        except Exception:
+            msg += f"• **{ticker}**: {shares} shares (Avg ${avg:,.2f})\n"
+            
+    msg += f"\n*Net Worth:* **${total_value:,.2f}**"
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+# --- ORIGINAL COMMANDS ---
 async def analyse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    
-    if not client:
-        await update.message.reply_text("I need a GEMINI_API_KEY to do that.")
-        return
-        
-    if chat_id not in chat_histories or len(chat_histories[chat_id]) < 5:
+    if not client or chat_id not in chat_histories or len(chat_histories[chat_id]) < 5:
         await update.message.reply_text("I need a bit more chat history (at least 5 messages) to analyze the debate!")
         return
-        
-    history_context = "\n".join(chat_histories[chat_id])
-    
+    history_context = "\n".join(chat_histories[chat_id][-30:])
     prompt = (
         "You are an intelligent, objective referee and factual analyst in a group chat.\n"
         "The user has commanded you to analyze the recent conversation.\n"
@@ -126,44 +265,29 @@ async def analyse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "4. Name the person who has the better arguments and explain WHY based strictly on facts, realism, and logic.\n"
         "5. NEVER use diplomatic phrases like 'As an AI, I am neutral'. You MUST pick a winner or explicitly call out the better argument.\n"
         "6. ABSOLUTE RULE: Do not use any profanity. Do not abuse constitutional posts.\n\n"
-        f"--- RECENT CHAT HISTORY (Last {MAX_HISTORY_LENGTH} messages) ---\n{history_context}"
+        f"--- RECENT CHAT HISTORY (Last 30 messages) ---\n{history_context}"
     )
-    
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action='typing')
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MODEL_NAME, 
-            contents=prompt
-        )
-        if response and response.text:
-            await update.message.reply_text(f"📊 *Debate Analysis:*\n\n{response.text.strip()}", parse_mode='Markdown')
-        else:
-            await update.message.reply_text("I couldn't analyze the chat right now.")
+        response = await asyncio.to_thread(client.models.generate_content, model=MODEL_NAME, contents=prompt)
+        await update.message.reply_text(f"📊 *Debate Analysis:*\n\n{response.text.strip()}", parse_mode='Markdown')
     except Exception as e:
-        logger.error(f"Error in analyse command: {e}")
-        await update.message.reply_text("An error occurred while analyzing the chat.")
+        logger.error(e)
 
-
-# --- MAIN CHAT HANDLER ---
 async def analyze_message_with_gemini(chat_history_str: str, current_message: str, is_direct_query: bool = False) -> str:
-    """
-    Sends the recent chat history and current message to Gemini for analysis.
-    """
     if not client:
         return ""
-        
     try:
         if is_direct_query:
             prompt = (
                 "You are an intelligent, objective, and highly knowledgeable AI Assistant acting as one of the cousins in a family group chat discussing business, finance, news, or general topics. "
                 "Someone has directly asked you for your input, reasoning, or opinion. "
                 "CRITICAL INSTRUCTIONS:\n"
-                "1. PERSONA: You must act like a smart, friendly cousin. Occasionally use terms like 'bhaiya', 'didi', or 'guys' when addressing people. Keep the tone homely but incredibly factual and sharp.\n"
+                "1. PERSONA: You must act like a smart, friendly cousin. Occasionally use terms like 'bhaiya', 'didi', or 'guys'. Keep the tone homely but incredibly factual.\n"
                 "2. NO ESSAYS. You must respond using concise, hard-hitting bullet points. Use your intelligence to determine how many points are needed to accurately balance the topic, but NEVER exceed 10 points.\n"
-                "3. NEVER use diplomatic phrases like 'As an AI, I am neutral' or 'I must remain objective.'\n"
+                "3. NEVER use diplomatic phrases like 'As an AI, I am neutral'.\n"
                 "4. If asked about an opinion or a debatable topic, present both sides of the argument fairly within those bullets, then give a realistic conclusion.\n"
-                "5. ABSOLUTE RULE: Do NOT use any profanity. Do NOT abuse or disrespect constitutional posts (e.g., the Prime Minister, President, etc.). Express critiques respectfully.\n\n"
+                "5. ABSOLUTE RULE: Do NOT use any profanity. Do NOT abuse or disrespect constitutional posts.\n\n"
                 "Below is the recent chat history for context, followed by the explicit message/query directed at you.\n\n"
                 f"--- RECENT CHAT HISTORY ---\n{chat_history_str}\n\n"
                 f"--- DIRECT QUERY FOR YOU ---\n{current_message}"
@@ -176,26 +300,17 @@ async def analyze_message_with_gemini(chat_history_str: str, current_message: st
                 "1. If the statement is a subjective opinion, an argument, a debatable viewpoint, or simply mostly accurate, you MUST reply with ONLY the exact string 'NO_CORRECTION_NEEDED'.\n"
                 "2. If there is a blatant factual error, intervene and lightly correct your cousins (you can use 'bhaiya/didi/guys'). Provide the correct facts immediately in 1 to 2 short bullet points. No essays.\n"
                 "3. NEVER use diplomatic phrases or meta-commentary about being an AI.\n"
-                "4. ABSOLUTE RULE: Do NOT use any profanity. Do NOT abuse or disrespect constitutional posts.\n"
+                "4. ABSOLUTE RULE: Do NOT use any profanity. Do NOT abuse constitutional posts.\n"
                 "Do not intervene for minor technicalities; only jump in when something is demonstrably false and misleading.\n\n"
                 "Below is the recent chat history for context, followed by the latest message.\n\n"
                 f"--- RECENT CHAT HISTORY ---\n{chat_history_str}\n\n"
                 f"--- LATEST MESSAGE TO CHECK ---\n{current_message}"
             )
-
-        # Using the new google-genai syntax
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MODEL_NAME, 
-            contents=prompt
-        )
-        
+        response = await asyncio.to_thread(client.models.generate_content, model=MODEL_NAME, contents=prompt)
         if response and response.text:
             return response.text.strip()
-            
-    except Exception as e:
-        logger.error(f"Error querying Gemini: {e}")
-        
+    except Exception:
+        pass
     return ""
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -208,36 +323,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.message.from_user.first_name if update.message.from_user else "User"
     bot_username = context.bot.username
     
-    # Update chat history
     if chat_id not in chat_histories:
         chat_histories[chat_id] = []
         
     formatted_msg = f"{user_name}: {text}"
     chat_histories[chat_id].append(formatted_msg)
     
-    # Keep history bounded based on the new MAX limit (30)
     if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
         chat_histories[chat_id].pop(0)
 
-    # 1. Feature: Automatic Link Summarization
+    # Summarize URLs
     urls = extract_urls(text)
     if urls:
-        first_url = urls[0] # Just summarize the first link if multiple are sent
+        first_url = urls[0]
         try:
             await context.bot.send_chat_action(chat_id=chat_id, action='typing')
         except:
             pass
-            
         summary = await summarize_link(first_url)
         if summary:
-            # Send the summary, then return early so we don't double dip into a fact check
             await update.message.reply_text(f"🔗 *Article Summary:*\n\n{summary}", parse_mode='Markdown', reply_to_message_id=update.message.id)
             return
 
-    # Build history context string
-    history_context = "\n".join(chat_histories[chat_id][:-1]) if len(chat_histories[chat_id]) > 1 else "(No prior context)"
+    history_context = "\n".join(chat_histories[chat_id][-30:]) if len(chat_histories[chat_id]) > 1 else "(No prior context)"
 
-    # Check if the bot is explicitly mentioned or replied to
     is_reply_to_bot = (
         update.message.reply_to_message and 
         update.message.reply_to_message.from_user and
@@ -250,49 +359,39 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query_text = text
         if bot_username:
             query_text = query_text.replace(f"@{bot_username}", "").strip()
-            
         if not query_text and update.message.reply_to_message and update.message.reply_to_message.text:
              query_text = f"[Replying to: {update.message.reply_to_message.text}]"
-
         try:
             await context.bot.send_chat_action(chat_id=chat_id, action='typing')
         except Exception:
             pass
-            
         result = await analyze_message_with_gemini(history_context, f"{user_name}: {query_text}", is_direct_query=True)
-        
         if result:
             await update.message.reply_text(result, parse_mode='Markdown')
-        else:
-            await update.message.reply_text("I'm sorry, I couldn't process that right now. Ensure GEMINI_API_KEY is active and valid.")
             
     else:
-        # Spectator Mode Fact-Checking
+        # Fact-Checking specator mode
         if len(text.split()) > 4: 
             result = await analyze_message_with_gemini(history_context, f"{user_name}: {text}", is_direct_query=False)
-            
             if result and result.strip() != "NO_CORRECTION_NEEDED":
-                 intervention_msg = f"⚠️ *Fact Check:*\n\n{result}"
-                 await update.message.reply_text(intervention_msg, parse_mode='Markdown', reply_to_message_id=update.message.id)
+                 await update.message.reply_text(f"⚠️ *Fact Check:*\n\n{result}", parse_mode='Markdown', reply_to_message_id=update.message.id)
 
 def main():
     if not TOKEN:
-        logger.error("Error: TELEGRAM_BOT_TOKEN not found in environment.")
         return
-        
-    if not GEMINI_API_KEY:
-        logger.warning("Warning: GEMINI_API_KEY not found in environment. Bot will not be able to answer/fact-check.")
-        
     application = ApplicationBuilder().token(TOKEN).build()
     
+    # Adding original + new commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("analyse", analyse_command))
+    application.add_handler(CommandHandler("devils_advocate", devils_advocate_command))
+    application.add_handler(CommandHandler("catchup", catchup_command))
+    application.add_handler(CommandHandler("settlethis", settlethis_command))
+    application.add_handler(CommandHandler("buy", buy_command))
+    application.add_handler(CommandHandler("portfolio", portfolio_command))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
 
     logger.info(f"Fact Checker & Analyst Bot is running... (Model: {MODEL_NAME})")
-    
-    # drop_pending_updates=True clears out old messages and fixes the "Conflict" error 
-    # if multiple instances or ghost processes try to poll at once
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
