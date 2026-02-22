@@ -1,6 +1,9 @@
 import logging
 import os
 import asyncio
+import re
+import httpx
+from bs4 import BeautifulSoup
 from typing import Dict, List
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
@@ -32,16 +35,117 @@ logger = logging.getLogger(__name__)
 
 # Dictionary to hold the last N messages for context
 chat_histories: Dict[int, List[str]] = {}
-MAX_HISTORY_LENGTH = 15
+MAX_HISTORY_LENGTH = 30  # Increased to 30 as requested
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "Hello! 🤖 *Fact Checker & Analyst Bot* is active.\n\n"
         "I spectate this group to intervene if I detect objectively factually incorrect statements.\n"
-        "You can also reply to my messages or tag me to ask for my opinion, reasoning, or analysis of the ongoing conversation!"
+        "You can also reply to my messages or tag me to ask for my opinion, reasoning, or analysis of the ongoing conversation!\n\n"
+        "**New Features:**\n"
+        "• Send a link, and I will automatically reply with a 5-6 bullet summary.\n"
+        "• Type `/analyse` to get a summary of the debate over the last 30 messages, including my take on who has the most realistic and factual arguments."
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
+# --- WEB SCRAPING UTILS ---
+def extract_urls(text: str) -> List[str]:
+    url_pattern = re.compile(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s]*')
+    return url_pattern.findall(text)
+
+async def fetch_article_text(url: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as http_client:
+            response = await http_client.get(url)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Remove scripts and styles
+            for script in soup(["script", "style"]):
+                script.extract()
+                
+            text = soup.get_text(separator=' ')
+            # Clean up whitespace
+            lines = (line.strip() for line in text.splitlines())
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            text = '\n'.join(chunk for chunk in chunks if chunk)
+            
+            # Return up to 15,000 characters to prevent massive payloads
+            return text[:15000]
+    except Exception as e:
+        logger.error(f"Error fetching URL {url}: {e}")
+        return ""
+
+async def summarize_link(url: str) -> str:
+    article_text = await fetch_article_text(url)
+    if not article_text:
+        return ""
+        
+    prompt = (
+        "You are an intelligent summarization AI. A user just shared a link in a group chat.\n"
+        "CRITICAL INSTRUCTIONS:\n"
+        "1. Provide exactly a 5 to 6 bullet point summary of the following article content.\n"
+        "2. Be extremely direct and concise.\n"
+        "3. NEVER use diplomatic filler like 'As an AI' or 'Here is the summary'. Start straight with the bullets.\n\n"
+        f"--- ARTICLE CONTENT ---\n{article_text}"
+    )
+    
+    try:
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=MODEL_NAME, 
+            contents=prompt
+        )
+        if response and response.text:
+            return response.text.strip()
+    except Exception as e:
+        logger.error(f"Error summarizing link: {e}")
+    return ""
+
+# --- COMMANDS ---
+async def analyse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    if not client:
+        await update.message.reply_text("I need a GEMINI_API_KEY to do that.")
+        return
+        
+    if chat_id not in chat_histories or len(chat_histories[chat_id]) < 5:
+        await update.message.reply_text("I need a bit more chat history (at least 5 messages) to analyze the debate!")
+        return
+        
+    history_context = "\n".join(chat_histories[chat_id])
+    
+    prompt = (
+        "You are an intelligent, objective referee and factual analyst in a group chat.\n"
+        "The user has commanded you to analyze the recent conversation.\n"
+        "CRITICAL INSTRUCTIONS:\n"
+        "1. Read the following chat history (formatted as Name: Message).\n"
+        "2. Concisely summarize the main arguments being made.\n"
+        "3. Explicitly state your take on WHO is winning the debate or who is more realistic in their analysis.\n"
+        "4. Name the person who has the better arguments and explain WHY based strictly on facts, realism, and logic.\n"
+        "5. NEVER use diplomatic phrases like 'As an AI, I am neutral'. You MUST pick a winner or explicitly call out the better argument.\n"
+        "6. ABSOLUTE RULE: Do not use any profanity. Do not abuse constitutional posts.\n\n"
+        f"--- RECENT CHAT HISTORY (Last {MAX_HISTORY_LENGTH} messages) ---\n{history_context}"
+    )
+    
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=MODEL_NAME, 
+            contents=prompt
+        )
+        if response and response.text:
+            await update.message.reply_text(f"📊 *Debate Analysis:*\n\n{response.text.strip()}", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("I couldn't analyze the chat right now.")
+    except Exception as e:
+        logger.error(f"Error in analyse command: {e}")
+        await update.message.reply_text("An error occurred while analyzing the chat.")
+
+
+# --- MAIN CHAT HANDLER ---
 async def analyze_message_with_gemini(chat_history_str: str, current_message: str, is_direct_query: bool = False) -> str:
     """
     Sends the recent chat history and current message to Gemini for analysis.
@@ -110,10 +214,25 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     formatted_msg = f"{user_name}: {text}"
     chat_histories[chat_id].append(formatted_msg)
     
-    # Keep history bounded
+    # Keep history bounded based on the new MAX limit (30)
     if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
         chat_histories[chat_id].pop(0)
-        
+
+    # 1. Feature: Automatic Link Summarization
+    urls = extract_urls(text)
+    if urls:
+        first_url = urls[0] # Just summarize the first link if multiple are sent
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+        except:
+            pass
+            
+        summary = await summarize_link(first_url)
+        if summary:
+            # Send the summary, then return early so we don't double dip into a fact check
+            await update.message.reply_text(f"🔗 *Article Summary:*\n\n{summary}", parse_mode='Markdown', reply_to_message_id=update.message.id)
+            return
+
     # Build history context string
     history_context = "\n".join(chat_histories[chat_id][:-1]) if len(chat_histories[chat_id]) > 1 else "(No prior context)"
 
@@ -166,6 +285,7 @@ def main():
     application = ApplicationBuilder().token(TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("analyse", analyse_command))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
 
     logger.info(f"Fact Checker & Analyst Bot is running... (Model: {MODEL_NAME})")

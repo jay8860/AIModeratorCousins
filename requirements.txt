@@ -4,3 +4,4 @@ python-telegram-bot==20.6
 google-genai
 python-dotenv
 httpx
+beautifulsoup4
