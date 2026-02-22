@@ -562,8 +562,8 @@ async def analyze_message_with_gemini(chat_history_str: str, current_message: st
         response = await asyncio.to_thread(client.models.generate_content, model=MODEL_NAME, contents=prompt)
         if response and response.text:
             return response.text.strip()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Gemini API Error in analyze_message: {e}")
     return ""
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -622,14 +622,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         result = await analyze_message_with_gemini(history_context, f"{user_name}: {query_text}", is_direct_query=True)
         if result:
-            await update.message.reply_text(result, parse_mode='Markdown')
+            try:
+                await update.message.reply_text(result, parse_mode='Markdown')
+            except Exception as e:
+                logger.warning(f"Markdown parsing failed, falling back to raw text: {e}")
+                await update.message.reply_text(result)
             
     else:
         # Fact-Checking specator mode
         if len(text.split()) > 4: 
             result = await analyze_message_with_gemini(history_context, f"{user_name}: {text}", is_direct_query=False)
             if result and result.strip() != "NO_CORRECTION_NEEDED":
-                 await update.message.reply_text(f"⚠️ *Fact Check:*\n\n{result}", parse_mode='Markdown', reply_to_message_id=update.message.id)
+                 try:
+                     await update.message.reply_text(f"⚠️ *Fact Check:*\n\n{result}", parse_mode='Markdown', reply_to_message_id=update.message.id)
+                 except Exception as e:
+                     logger.warning(f"Markdown parse failed for fact-check: {e}")
+                     await update.message.reply_text(f"⚠️ Fact Check:\n\n{result}", reply_to_message_id=update.message.id)
 
 def main():
     if not TOKEN:
