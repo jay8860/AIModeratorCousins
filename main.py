@@ -192,9 +192,42 @@ async def settlethis_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(e)
         await update.message.reply_text("Failed to generate a poll.")
 
+async def fetch_google_finance_price(query: str) -> float:
+    """Scrapes Google Finance for a given search query (e.g. ZOMATO:NSE)."""
+    url = f"https://www.google.com/finance/quote/{query}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            # Google Finance typically stores the price in a div with this class
+            price_div = soup.find('div', class_='YMlKec fxKbKc')
+            if price_div:
+                price_text = price_div.text.replace('₹', '').replace('$', '').replace(',', '').strip()
+                return float(price_text)
+    except Exception as e:
+        logger.error(f"Google Finance scrape failed for {query}: {e}")
+    return 0.0
+
 async def get_live_price_inr(ticker: str) -> float:
     """Helper to fetch price and convert to INR if it is in another currency like USD."""
     try:
+        # --- NEW: Google Finance Scraper for Indian Stocks ---
+        # Yahoo Finance explicitly blocks ZOMATO.NS and other active Indian stocks.
+        price = 0.0
+        if ticker.endswith('.NS'):
+            gf_ticker = ticker.replace('.NS', ':NSE')
+            price = await fetch_google_finance_price(gf_ticker)
+            if price > 0:
+                return price
+        elif ticker.endswith('.BO'):
+            gf_ticker = ticker.replace('.BO', ':BOM')
+            price = await fetch_google_finance_price(gf_ticker)
+            if price > 0:
+                return price
+                
+        # --- FALLBACK: Yahoo Finance ---
         stock = yf.Ticker(ticker)
         fast_info = stock.fast_info
         
@@ -481,6 +514,21 @@ async def analyze_message_with_gemini(chat_history_str: str, current_message: st
     if not client:
         return ""
     try:
+        bot_manual = (
+            "--- BOT MANUAL (YOUR FEATURES & COMMANDS) ---\n"
+            "If someone asks what you do, what your features are, or what commands you have, you MUST reference this list.\n"
+            "1. Fact-Checking Spectator: You read every message and automatically intervene if someone says something factually incorrect. You don't intervene for opinions.\n"
+            "2. URL Summarizer: If anyone posts a link, you automatically summarize the article into 5-6 bullets.\n"
+            "3. /analyse: You summarize the recent argument and objectively declare a factual winner.\n"
+            "4. /devils_advocate: You read the group consensus and argue the exact opposite to spark debate.\n"
+            "5. /buy [stock/crypto] [qty]: Users paper-trade starting with ₹1 Crore cash (e.g. /buy bitcoin 10, /buy reliance 50).\n"
+            "6. /sell [stock] [qty]: Sell owned paper assets back into cash.\n"
+            "7. /portfolio: View personal live paper-trading holdings and ROI.\n"
+            "8. /leaderboard: View the entire group's net worth and ROI scoreboard.\n"
+            "9. /settlethis: Identifies the current group disagreement and generates a Telegram poll to vote on it.\n"
+            "10. /catchup: Summarizes the last ~100 messages for someone who was offline.\n"
+        )
+        
         if is_direct_query:
             prompt = (
                 "You are an intelligent, objective, and highly knowledgeable AI Assistant acting as one of the cousins in a family group chat discussing business, finance, news, or general topics. "
@@ -491,6 +539,7 @@ async def analyze_message_with_gemini(chat_history_str: str, current_message: st
                 "3. NEVER use diplomatic phrases like 'As an AI, I am neutral'.\n"
                 "4. If asked about an opinion or a debatable topic, present both sides of the argument fairly within those bullets, then give a realistic conclusion.\n"
                 "5. ABSOLUTE RULE: Do NOT use any profanity. Do NOT abuse or disrespect constitutional posts.\n\n"
+                f"{bot_manual}\n\n"
                 "Below is the recent chat history for context, followed by the explicit message/query directed at you.\n\n"
                 f"--- RECENT CHAT HISTORY ---\n{chat_history_str}\n\n"
                 f"--- DIRECT QUERY FOR YOU ---\n{current_message}"
@@ -509,6 +558,7 @@ async def analyze_message_with_gemini(chat_history_str: str, current_message: st
                 f"--- RECENT CHAT HISTORY ---\n{chat_history_str}\n\n"
                 f"--- LATEST MESSAGE TO CHECK ---\n{current_message}"
             )
+
         response = await asyncio.to_thread(client.models.generate_content, model=MODEL_NAME, contents=prompt)
         if response and response.text:
             return response.text.strip()
