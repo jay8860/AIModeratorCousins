@@ -198,21 +198,48 @@ async def get_live_price_inr(ticker: str) -> float:
         stock = yf.Ticker(ticker)
         fast_info = stock.fast_info
         
-        # Try to get the price
+        # 1. Try fast_info
         price = fast_info.get("lastPrice")
         
-        # Handle crypto fallback
+        # 2. Try info
+        if not price:
+            try:
+                price = stock.info.get("currentPrice", stock.info.get("regularMarketPrice"))
+            except Exception:
+                pass
+                
+        # 3. Try history
+        if not price:
+            try:
+                hist = stock.history(period="1d")
+                if hist is not None and not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+            except Exception:
+                pass
+                
+        # Handle crypto fallback if all failed and it's an INR crypto pair
         if not price and "-INR" in ticker:
-            ticker = ticker.replace("-INR", "-USD")
-            stock = yf.Ticker(ticker)
+            fallback = ticker.replace("-INR", "-USD")
+            stock = yf.Ticker(fallback)
             fast_info = stock.fast_info
             price = fast_info.get("lastPrice")
+            if not price:
+                try:
+                    price = stock.info.get("currentPrice")
+                except Exception:
+                    pass
             
         if not price:
             return 0.0
             
-        # Determine currency
-        currency = getattr(fast_info, 'currency', getattr(stock.info, 'currency', 'INR')).upper()
+        # Determine currency robustly
+        currency = getattr(fast_info, 'currency', None)
+        if not currency:
+            try:
+                currency = stock.info.get("currency", "INR")
+            except Exception:
+                currency = "INR"
+        currency = str(currency).upper()
         
         # If it's already INR, return exact
         if currency == 'INR' or ticker.endswith('.NS') or ticker.endswith('.BO'):
@@ -221,14 +248,15 @@ async def get_live_price_inr(ticker: str) -> float:
         # Otherwise, assume it needs conversion (like USD)
         try:
             fx = yf.Ticker("USDINR=X")
-            fx_rate = fx.fast_info.get("lastPrice", 83.5) # Fallback to 83.5 if API fails
+            fx_rate = fx.fast_info.get("lastPrice")
+            if not fx_rate:
+                fx_rate = fx.info.get("regularMarketPrice", 83.5)
             return float(price * fx_rate)
         except Exception:
             return float(price * 83.5)
             
     except Exception as e:
         logger.error(f"Error fetching price for {ticker}: {e}")
-        return 0.0
 
 async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
